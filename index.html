@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AL-JADO TEAM</title>
+    
+    <!-- App & Mobile Display Settings -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="AL-JADO TEAM">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#0b0e14">
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="container">
+
+    <!-- App Header Nav -->
+    <header class="app-header">
+        <div class="app-title">
+            <h1>👑 AL-JADO TEAM</h1>
+            <p>منظومة الإدارة المحاسبية والخزينة المركزية</p>
+        </div>
+
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+            <!-- Central Storage Sync Status Button -->
+            <div class="cloud-status-badge" onclick="openCloudModal()" title="إعدادات الحماية والتخزين المركزي">
+                <span id="cloudStatusDot" class="cloud-dot"></span>
+                <span id="cloudStatusText">🔐 التخزين المركزي: غير متصل</span>
+            </div>
+
+            <!-- Month Selector for Historical Archive -->
+            <div class="date-picker-wrapper">
+                <label for="monthSelector">📅 أرشيف الشهر:</label>
+                <input type="month" id="monthSelector" onchange="changeMonthArchive()">
+            </div>
+
+            <!-- Daily Date Selector -->
+            <div class="date-picker-wrapper">
+                <label for="docDate">📌 اليوم المحدد:</label>
+                <input type="date" id="docDate" onchange="loadArchive()">
+            </div>
+        </div>
+    </header>
+
+    <!-- Top Key Metrics Row -->
+    <section class="metrics-grid">
+        <div class="metric-card m-green">
+            <span>أرباح اليوم الصافية</span>
+            <h2 id="dailyProfitDisplay" style="color: var(--cyber-green);">0 ليرة</h2>
+        </div>
+        <div class="metric-card m-blue">
+            <span>أرباح الشهر المختار</span>
+            <h2 id="monthlyProfitDisplay" style="color: var(--cyber-blue);">0 ليرة</h2>
+        </div>
+        <div class="metric-card m-yellow">
+            <span>إجمالي تعبئة اليوم (T)</span>
+            <h2 id="dailyTDisplay" style="color: var(--cyber-yellow);">0 ليرة</h2>
+        </div>
+        <div class="metric-card m-blue">
+            <span>إجمالي واصل اليوم (W)</span>
+            <h2 id="dailyWDisplay" style="color: var(--cyber-blue);">0 ليرة</h2>
+        </div>
+    </section>
+
+    <!-- Main Dashboard Section Split -->
+    <div class="dashboard-layout">
+
+        <!-- Left Panel: Transaction Input -->
+        <main class="panel">
+            <div class="panel-header">
+                <h3>✍️ تسجيل حركة وكيل واستعلام الرصيد</h3>
+            </div>
+
+            <div class="form-grid">
+                <div class="form-group" style="grid-column: span 2;">
+                    <label>اسم الوكيل / اللاعب:</label>
+                    <input type="text" id="agentName" list="agentsList" placeholder="أدخل اسم الوكيل..." oninput="updateCumulativeCalculations()">
+                    <datalist id="agentsList"></datalist>
+                </div>
+            </div>
+
+            <!-- Cumulative Historical Totals Box -->
+            <div class="cumulative-bar">
+                <div class="cum-item">
+                    <span>التعبئة التراكمية للشهر (T)</span>
+                    <strong id="liveT" style="color: var(--cyber-blue);">0</strong>
+                </div>
+                <div class="cum-item">
+                    <span>الواصل التراكمي للشهر (W)</span>
+                    <strong id="liveW" style="color: var(--cyber-green);">0</strong>
+                </div>
+                <div class="cum-item">
+                    <span>الباقي المستحق للشهر (B)</span>
+                    <strong id="liveB" style="color: var(--cyber-yellow);">0</strong>
+                </div>
+            </div>
+
+            <!-- Transaction Inputs Grid -->
+            <div class="form-grid">
+                <div class="form-group">
+                    <label>تعبئة اليوم (T):</label>
+                    <input type="number" id="inputT" placeholder="0" oninput="updateCumulativeCalculations()">
+                </div>
+                <div class="form-group">
+                    <label>واصل اليوم كاش (W):</label>
+                    <input type="number" id="inputW" placeholder="0" oninput="updateCumulativeCalculations()">
+                </div>
+                <!-- الخانة الجديدة: تسديد مستحق سابق/رصيد مدوّر -->
+                <div class="form-group">
+                    <label>رصيد مدوّر / تسديد سابق:</label>
+                    <input type="number" id="inputRollover" placeholder="0 (لا يدخل بالكاش)" oninput="updateCumulativeCalculations()">
+                </div>
+                <div class="form-group">
+                    <label>نسبتي الصافية (%):</label>
+                    <input type="number" id="inputMyPercent" placeholder="فارغ (أدخل %)">
+                </div>
+                <div class="form-group">
+                    <label>نسبة الوكيل (%):</label>
+                    <input type="number" id="inputAgentPercent" placeholder="فارغ (أدخل %)" oninput="updateCumulativeCalculations()">
+                </div>
+            </div>
+
+            <!-- Dynamic Cumulative Alert Box -->
+            <div id="alarmCard" class="alert-box">
+                <h4>🚨 تنبيه تجاوز في الحساب التراكمي!</h4>
+                <p id="alarmMessage"></p>
+                <button class="btn btn-outline-red" onclick="copyAlarmWhatsApp()">📋 نسخ إنذار الواتساب للعميل</button>
+            </div>
+
+            <div class="btn-row">
+                <button class="btn btn-primary" onclick="saveTransaction()">💾 حفظ العملية</button>
+                <button class="btn btn-outline-yellow" onclick="copyWhatsApp()">📋 نسخ مطابقة الحساب</button>
+            </div>
+        </main>
+
+        <!-- Right Side Panel: Treasury & Filters -->
+        <aside class="panel" style="display: flex; flex-direction: column; gap: 16px;">
+            <div>
+                <div class="panel-header">
+                    <h3>🏦 الخزينة وسجل الشحنات</h3>
+                </div>
+                <div class="form-group">
+                    <label>شحنة رصيد جديدة للموقع (سالب = سحب شركة):</label>
+                    <div style="display: flex; gap: 6px;">
+                        <input type="number" id="siteChargeInput" placeholder="مثال: 50000">
+                        <button class="btn btn-primary" style="padding: 0 12px;" onclick="addSiteCharge()">إضافة</button>
+                    </div>
+                    <div class="mini-list" id="siteChargesList"></div>
+                </div>
+
+                <div class="form-group" style="margin-top: 10px;">
+                    <label>تسديد مدفوع للشركة (سالب = استلام أموال):</label>
+                    <div style="display: flex; gap: 6px;">
+                        <input type="number" id="companyPaymentInput" placeholder="مثال: 27500">
+                        <button class="btn btn-primary" style="padding: 0 12px;" onclick="addCompanyPayment()">إضافة</button>
+                    </div>
+                    <div class="mini-list" id="companyPaymentsList"></div>
+                </div>
+
+                <!-- Treasury Balance Details -->
+                <div style="background: rgba(11, 14, 20, 0.6); border-radius: 10px; padding: 10px; margin-top: 12px; font-size: 0.8rem; display: flex; flex-direction: column; gap: 5px;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>إجمالي شحنات الشهر:</span><strong id="totalSiteCharges">0</strong>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>المتبقي بالسيستم لشهر:</span><strong id="remainingSiteBalance" style="color: var(--cyber-blue);">0</strong>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>الكاش المجمع للشهر (W):</span><strong id="totalCollectedCash" style="color: var(--cyber-green);">0</strong>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span>المدفوع للشركة للشهر:</span><strong id="totalCompanyPaid" style="color: var(--cyber-yellow);">0</strong>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 4px;">
+                        <span>موقف الخزينة للشهر:</span><strong id="netTreasuryPosition">0</strong>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Agent Profits Controls -->
+            <div>
+                <div class="panel-header" style="margin-bottom: 8px;">
+                    <h3>⚙️ تفعيل أرباح الوكلاء</h3>
+                </div>
+                <div class="agents-filter-grid" id="agentsControlContainer"></div>
+            </div>
+        </aside>
+
+    </div>
+
+    <!-- Range Filter Section -->
+    <section class="panel">
+        <div class="panel-header">
+            <h3>🔍 تقارير وفلترة حسب المدى الزمني (من تاريخ ... إلى تاريخ ...)</h3>
+        </div>
+        <div class="form-grid" style="align-items: flex-end;">
+            <div class="form-group">
+                <label>من تاريخ:</label>
+                <input type="date" id="filterFromDate">
+            </div>
+            <div class="form-group">
+                <label>إلى تاريخ:</label>
+                <input type="date" id="filterToDate">
+            </div>
+            <div class="form-group">
+                <button class="btn btn-primary" onclick="runRangeFilter()">📊 عرض تقرير الفترة</button>
+            </div>
+        </div>
+
+        <div class="cumulative-bar" style="margin-top: 16px;">
+            <div class="cum-item">
+                <span>إجمالي التعبئة للفترة (T)</span>
+                <strong id="rangeTotalT" style="color: var(--cyber-blue);">0</strong>
+            </div>
+            <div class="cum-item">
+                <span>إجمالي الواصل للفترة (W)</span>
+                <strong id="rangeTotalW" style="color: var(--cyber-green);">0</strong>
+            </div>
+            <div class="cum-item">
+                <span>أرباح الفترة الصافية</span>
+                <strong id="rangeTotalProfit" style="color: var(--cyber-green);">0</strong>
+            </div>
+            <div class="cum-item">
+                <span>صافي الفرق المستحق (B)</span>
+                <strong id="rangeTotalB" style="color: var(--cyber-yellow);">0</strong>
+            </div>
+        </div>
+    </section>
+
+    <!-- Quick Tools Helper Cards -->
+    <section class="panel">
+        <div class="panel-header">
+            <h3>🧮 الخانات والآلات الحاسبة المساعدة</h3>
+        </div>
+        <div class="helpers-grid">
+            <div class="helper-card">
+                <h4>1. كم أعبئ له عند استلام كاش؟</h4>
+                <div class="form-group"><input type="number" id="calc2Cash" placeholder="الكاش المستلم" oninput="runCalc2()"></div>
+                <div class="form-group" style="margin-top: 4px;"><input type="number" id="calc2Percent" placeholder="النسبة %" oninput="runCalc2()"></div>
+                <div class="helper-result">الشحن المطلوبة: <span id="calc2Result" style="color: var(--cyber-green);">0</span></div>
+            </div>
+
+            <div class="helper-card">
+                <h4>2. كم ثمنها عند طلب رصيد؟</h4>
+                <div class="form-group"><input type="number" id="calc3Amount" placeholder="الرصيد المطلوب" oninput="runCalc3()"></div>
+                <div class="form-group" style="margin-top: 4px;"><input type="number" id="calc3Percent" placeholder="النسبة %" oninput="runCalc3()"></div>
+                <div class="helper-result">الكاش المطلوب: <span id="calc3Result" style="color: var(--cyber-green);">0</span></div>
+            </div>
+
+            <div class="helper-card">
+                <h4>3. السحب العكسي لكاش صافي</h4>
+                <div class="form-group"><input type="number" id="calcReverseCash" placeholder="الكاش الصافي" oninput="runReverseCalc()"></div>
+                <div class="form-group" style="margin-top: 4px;"><input type="number" id="calcReversePercent" placeholder="النسبة %" oninput="runReverseCalc()"></div>
+                <div class="helper-result">قيمة السحب (T): <span id="calcReverseResult" style="color: var(--cyber-blue);">0</span></div>
+            </div>
+
+            <div class="helper-card">
+                <h4>4. حاسبة الديون التراكمية</h4>
+                <div class="form-group"><input type="number" id="calcOldDebt" placeholder="الديون السابقة" oninput="runDebtCalc()"></div>
+                <div class="form-group" style="margin-top: 4px;"><input type="number" id="calcNewDebt" placeholder="السحب الجديد" oninput="runDebtCalc()"></div>
+                <div class="helper-result">مجموع المديونية: <span id="calcDebtResult" style="color: var(--cyber-yellow);">0</span></div>
+            </div>
+
+            <div class="helper-card">
+                <h4>🎮 5. تصفية حساب مرتجع (الألعاب)</h4>
+                <div class="form-group"><input type="number" id="calcGameAmount" placeholder="المبلغ المرتجع" oninput="runGameCalc()"></div>
+                <div class="form-group" style="margin-top: 4px;"><input type="number" id="calcGamePercent" placeholder="النسبة %" oninput="runGameCalc()"></div>
+                <div class="helper-result">الخصم: <span id="calcGameDiff" style="color: var(--cyber-yellow);">0</span> | الصافي: <span id="calcGameNet" style="color: var(--cyber-green);">0</span></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Master Archive Table Section -->
+    <section class="panel">
+        <div class="panel-header" style="flex-wrap: wrap; gap: 10px;">
+            <h3 id="archiveTitle">📂 سجل حركات اليوم المؤرشفة</h3>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn btn-primary" style="font-size: 0.75rem; padding: 4px 8px;" onclick="loadArchive()">🔄 اليوم المحدد</button>
+                <button class="btn btn-outline-red" style="font-size: 0.75rem; padding: 4px 8px;" onclick="deleteCurrentDayOps()">🗑️ حذف اليوم</button>
+                <button class="btn btn-outline-red" style="font-size: 0.75rem; padding: 4px 8px;" onclick="clearAllDatabase()">🚨 تصفير النظام</button>
+            </div>
+        </div>
+
+        <!-- Export & Backup Toolbar -->
+        <div class="export-bar">
+            <div class="export-bar-group">
+                <span style="font-size: 0.8rem; color: var(--cyber-blue); font-weight: 700;">📥 تصدير وتقارير:</span>
+                <select id="exportScopeSelect" class="export-select">
+                    <option value="current">السجل المعروض حالياً بالجدول</option>
+                    <option value="month">كامل حركات الشهر المحدد</option>
+                    <option value="all">جميع الحركات في النظام (شامل)</option>
+                </select>
+                <button class="btn btn-outline-green" style="font-size: 0.78rem; padding: 6px 12px;" onclick="exportDataAsCSV()">📊 تحميل CSV (إكسل)</button>
+                <button class="btn btn-outline-blue" style="font-size: 0.78rem; padding: 6px 12px;" onclick="exportFormattedReport('html')">📄 تحميل تقرير HTML</button>
+                <button class="btn btn-outline-yellow" style="font-size: 0.78rem; padding: 6px 12px;" onclick="exportFormattedReport('pdf')">🖨️ تقرير PDF / طباعة</button>
+            </div>
+            <div class="export-bar-group">
+                <button class="btn btn-outline-blue" style="font-size: 0.75rem; padding: 5px 10px;" onclick="downloadFullBackupJSON()">💾 نسخة احتياطية (JSON)</button>
+                <button class="btn btn-outline-yellow" style="font-size: 0.75rem; padding: 5px 10px;" onclick="document.getElementById('restoreJsonInput').click()">📂 استعادة نسخة</button>
+                <input type="file" id="restoreJsonInput" accept=".json" style="display: none;" onchange="restoreBackupFromJSON(event)">
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>التاريخ</th>
+                        <th>الوكيل</th>
+                        <th>التعبئة (T)</th>
+                        <th>الواصل (W)</th>
+                        <th>الربح الصافي</th>
+                        <th>الباقي المستحق (B)</th>
+                        <th>إجراءات</th>
+                    </tr>
+                </thead>
+                <tbody id="archiveTableBody"></tbody>
+            </table>
+        </div>
+    </section>
+
+</div>
+
+<!-- Password Protection Modal -->
+<div id="cloudModal" class="modal-overlay">
+    <div class="modal-card">
+        <div class="modal-lock-badge">🔐</div>
+        <h3>رمز الحماية والتخزين المركزي</h3>
+        <p>
+            أدخل رمز المرور الخاص بالمنظومة لتفعيل المزامنة المركزية واسترجاع البيانات على هذا المتصفح.
+        </p>
+
+        <div class="pin-input-wrapper">
+            <span class="pin-icon">🔑</span>
+            <input type="password" id="firebasePinInput" placeholder="أدخل رمز المرور..." dir="ltr" autocomplete="off" onkeydown="if(event.key==='Enter') saveCloudConfigFromModal()">
+            <button type="button" class="pin-toggle-btn" onclick="togglePinVisibility()" title="إظهار / إخفاء رمز المرور">👁️</button>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+            <button class="btn btn-primary" style="width: 100%; padding: 11px;" onclick="saveCloudConfigFromModal()">🔓 تأكيد ومزامنة البيانات</button>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn btn-outline-green" style="flex: 1; font-size: 0.78rem;" onclick="forcePushLocalToCloud()">⬆️ تحديث التخزين المركزي</button>
+                <button class="btn btn-outline-red" style="padding: 8px 16px; font-size: 0.78rem;" onclick="closeCloudModal()">إغلاق</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Firebase SDK (Compat for Static Web Apps) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="script.js"></script>
+
+</body>
+</html>
