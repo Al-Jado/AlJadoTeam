@@ -11,6 +11,7 @@
     let siteCharges = JSON.parse(localStorage.getItem('alJadoSiteCharges')) || [];
     let companyPayments = JSON.parse(localStorage.getItem('alJadoCompanyPayments')) || [];
     let deletedIds = JSON.parse(localStorage.getItem('alJadoDeletedIds')) || [];
+    let lastRestoredAt = Number(localStorage.getItem('alJadoLastRestoredAt')) || 0;
     let currentDisplayedOps = [];
 
     // متغيرات اتصال ومزامنة التخزين المركزي
@@ -89,7 +90,8 @@
                 agentProfitStatus: agentProfitStatus,
                 siteCharges: siteCharges,
                 companyPayments: companyPayments,
-                deletedIds: deletedIds
+                deletedIds: deletedIds,
+                lastRestoredAt: lastRestoredAt
             });
         } catch (e) {}
     }
@@ -110,6 +112,7 @@
                         siteCharges = data.siteCharges || [];
                         companyPayments = data.companyPayments || [];
                         deletedIds = data.deletedIds || [];
+                        lastRestoredAt = Number(data.lastRestoredAt) || 0;
                         saveLocalOnly();
                         resolve(true);
                     } else {
@@ -123,82 +126,98 @@
         }
     }
 
-    // حفظ نسخة طوارئ تلقائية قبل أي عملية حذف أو مسح
+    // حفظ تراكمي غير قابل للمسح في خزنة الطوارئ (تحتفظ بكل سجل أُنشئ حتى لو حُذف لاحقاً)
     function saveSafetyVaultSnapshot(reason = 'auto') {
-        if (memory.length === 0 && siteCharges.length === 0 && companyPayments.length === 0) return;
+        let existingVault = null;
+        try {
+            existingVault = JSON.parse(localStorage.getItem('alJadoSafetyVault'));
+        } catch (e) {}
+
+        const prevMem = existingVault ? normalizeArray(existingVault.memory) : [];
+        const prevCharges = existingVault ? normalizeArray(existingVault.siteCharges) : [];
+        const prevPayments = existingVault ? normalizeArray(existingVault.companyPayments) : [];
+        const prevStatus = (existingVault && existingVault.agentProfitStatus) ? existingVault.agentProfitStatus : {};
+
+        const mergedVaultMem = mergeListsById(memory, prevMem, new Set());
+        const mergedVaultCharges = mergeListsById(siteCharges, prevCharges, new Set());
+        const mergedVaultPayments = mergeListsById(companyPayments, prevPayments, new Set());
+
+        if (mergedVaultMem.length === 0 && mergedVaultCharges.length === 0 && mergedVaultPayments.length === 0) return;
+
         const snapshot = {
             reason: reason,
             savedAt: new Date().toISOString(),
-            memory: [...memory],
-            agentProfitStatus: { ...agentProfitStatus },
-            siteCharges: [...siteCharges],
-            companyPayments: [...companyPayments]
+            memory: mergedVaultMem,
+            agentProfitStatus: { ...prevStatus, ...agentProfitStatus },
+            siteCharges: mergedVaultCharges,
+            companyPayments: mergedVaultPayments
         };
         try {
             localStorage.setItem('alJadoSafetyVault', JSON.stringify(snapshot));
         } catch (e) {}
-        saveToIndexedDB('safety_vault');
 
         if (firebaseVaultRef) {
             firebaseVaultRef.set(snapshot).catch(() => {});
         }
     }
 
-    // استرجاع البيانات بضغطة زر في حال الحذف الخاطئ
+    // استرجاع البيانات بضغطة زر في حال الحذف الخاطئ أو التصفير الخاطئ
     async function recoverFromSafetyVault() {
-        let vaultData = null;
+        let cloudVault = null;
+        let localVault = null;
 
-        // 1. محاولة القراءة من خزنة الطوارئ السحابية أولاً
         if (firebaseVaultRef) {
             try {
                 const snap = await firebaseVaultRef.once('value');
                 if (snap.exists()) {
-                    vaultData = snap.val();
+                    cloudVault = snap.val();
                 }
             } catch (e) {}
         }
 
-        // 2. محاولة القراءة من خزنة الطوارئ المحلية
-        if (!vaultData) {
-            try {
-                vaultData = JSON.parse(localStorage.getItem('alJadoSafetyVault'));
-            } catch (e) {}
-        }
+        try {
+            localVault = JSON.parse(localStorage.getItem('alJadoSafetyVault'));
+        } catch (e) {}
 
-        // 3. محاولة القراءة من IndexedDB
-        if (!vaultData) {
-            const db = await openIndexedDB();
-            if (db) {
-                vaultData = await new Promise((resolve) => {
-                    const tx = db.transaction('snapshots', 'readonly');
-                    const req = tx.objectStore('snapshots').get('safety_vault');
-                    req.onsuccess = () => resolve(req.result || null);
-                    req.onerror = () => resolve(null);
-                });
-            }
-        }
+        const vaultMem = mergeListsById(
+            localVault ? normalizeArray(localVault.memory) : [],
+            cloudVault ? normalizeArray(cloudVault.memory) : [],
+            new Set()
+        );
+        const vaultCharges = mergeListsById(
+            localVault ? normalizeArray(localVault.siteCharges) : [],
+            cloudVault ? normalizeArray(cloudVault.siteCharges) : [],
+            new Set()
+        );
+        const vaultPayments = mergeListsById(
+            localVault ? normalizeArray(localVault.companyPayments) : [],
+            cloudVault ? normalizeArray(cloudVault.companyPayments) : [],
+            new Set()
+        );
 
-        if (!vaultData || (!vaultData.memory && !vaultData.siteCharges)) {
+        if (vaultMem.length === 0 && vaultCharges.length === 0 && vaultPayments.length === 0) {
             alert("ℹ️ لا توجد نسخة طوارئ سابقة مسجلة لاستعادتها حالياً.");
             return;
         }
 
-        const vaultMem = Array.isArray(vaultData.memory) ? vaultData.memory : (vaultData.memory ? Object.values(vaultData.memory) : []);
-        const vaultCharges = Array.isArray(vaultData.siteCharges) ? vaultData.siteCharges : (vaultData.siteCharges ? Object.values(vaultData.siteCharges) : []);
-        const vaultPayments = Array.isArray(vaultData.companyPayments) ? vaultData.companyPayments : (vaultData.companyPayments ? Object.values(vaultData.companyPayments) : []);
-
-        if (confirm(`هل تريد استرجاع بيانات الطوارئ المحفوظة (${vaultMem.length} حركة وكيل و ${vaultCharges.length} شحنة)؟ سيتم دمجها مع بياناتك الحالية دون حذف أي شيء.`)) {
+        if (confirm(`هل تريد استرجاع بيانات الطوارئ المحفوظة (${vaultMem.length} حركة وكيل و ${vaultCharges.length} شحنة)؟ سيتم دمجها واستعادتها بالكامل.`)) {
             deletedIds = [];
+            lastRestoredAt = Date.now();
             localStorage.setItem('alJadoDeletedIds', JSON.stringify(deletedIds));
+            localStorage.setItem('alJadoLastRestoredAt', String(lastRestoredAt));
 
             memory = mergeListsById(memory, vaultMem, new Set());
             siteCharges = mergeListsById(siteCharges, vaultCharges, new Set());
             companyPayments = mergeListsById(companyPayments, vaultPayments, new Set());
-            agentProfitStatus = { ...(vaultData.agentProfitStatus || {}), ...agentProfitStatus };
+            agentProfitStatus = {
+                ...(cloudVault?.agentProfitStatus || {}),
+                ...(localVault?.agentProfitStatus || {}),
+                ...agentProfitStatus
+            };
 
             saveLocalOnly();
             refreshAllViews();
-            await syncToCloud(true);
+            await syncToCloud(false);
             closeCloudModal();
             alert("✅ تم استرجاع كافة البيانات من خزنة الطوارئ ومزامنتها بنجاح!");
         }
@@ -424,6 +443,14 @@
                     const cloudCharges = normalizeArray(cloudData.siteCharges);
                     const cloudPayments = normalizeArray(cloudData.companyPayments);
                     const cloudDeleted = normalizeArray(cloudData.deletedIds).map(String);
+                    const cloudRestoredAt = Number(cloudData.lastRestoredAt) || 0;
+
+                    // إذا قام جهاز آخر باستعادة خزنة الطوارئ أو نسخة احتياطية حديثاً، نصفر قائمة المحذوفات القديمة على هذا الجهاز أيضاً!
+                    if (cloudRestoredAt > lastRestoredAt) {
+                        lastRestoredAt = cloudRestoredAt;
+                        try { localStorage.setItem('alJadoLastRestoredAt', String(lastRestoredAt)); } catch (e) {}
+                        deletedIds = [...cloudDeleted];
+                    }
 
                     // توحيد قائمة المحذوفات بين المحلي والسحابي
                     const combinedDeletedSet = new Set([...deletedIds.map(String), ...cloudDeleted]);
@@ -489,6 +516,7 @@
             localStorage.setItem('alJadoSiteCharges', JSON.stringify(siteCharges));
             localStorage.setItem('alJadoCompanyPayments', JSON.stringify(companyPayments));
             localStorage.setItem('alJadoDeletedIds', JSON.stringify(deletedIds));
+            localStorage.setItem('alJadoLastRestoredAt', String(lastRestoredAt));
         } catch (e) {}
         saveToIndexedDB('latest');
     }
@@ -514,6 +542,11 @@
                 if (snap.exists()) {
                     const cloudData = snap.val();
                     const cloudDeleted = normalizeArray(cloudData.deletedIds).map(String);
+                    const cloudRestoredAt = Number(cloudData.lastRestoredAt) || 0;
+                    if (cloudRestoredAt > lastRestoredAt) {
+                        lastRestoredAt = cloudRestoredAt;
+                        deletedIds = [...cloudDeleted];
+                    }
                     const combinedDeletedSet = new Set([...deletedIds.map(String), ...cloudDeleted]);
                     deletedIds = Array.from(combinedDeletedSet);
 
@@ -533,6 +566,7 @@
                 siteCharges: siteCharges,
                 companyPayments: companyPayments,
                 deletedIds: deletedIds.slice(-500),
+                lastRestoredAt: lastRestoredAt,
                 isCleared: isClearedExplicitly === true && memory.length === 0,
                 lastUpdated: new Date().toISOString()
             });
@@ -1424,7 +1458,9 @@
                 if (confirm("هل أنت متأكد من استعادة هذه النسخة الاحتياطية؟ سيتم دمجها وتحديث التخزين المركزي.")) {
                     saveSafetyVaultSnapshot('before_json_restore');
                     deletedIds = [];
+                    lastRestoredAt = Date.now();
                     localStorage.setItem('alJadoDeletedIds', JSON.stringify(deletedIds));
+                    localStorage.setItem('alJadoLastRestoredAt', String(lastRestoredAt));
 
                     memory = mergeListsById(memory, Array.isArray(data.memory) ? data.memory : [], new Set());
                     agentProfitStatus = { ...agentProfitStatus, ...(data.agentProfitStatus || {}) };
