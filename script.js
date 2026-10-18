@@ -108,7 +108,7 @@
                     const data = req.result;
                     if (data && ((data.memory && data.memory.length > 0) || (data.siteCharges && data.siteCharges.length > 0))) {
                         memory = data.memory || [];
-                        agentProfitStatus = data.agentProfitStatus || {};
+                        agentProfitStatus = decodeFirebaseMap(data.agentProfitStatus || {});
                         siteCharges = data.siteCharges || [];
                         companyPayments = data.companyPayments || [];
                         deletedIds = data.deletedIds || [];
@@ -130,10 +130,30 @@
     // 🔧 ترميز مفاتيح الكائنات (مثل أسماء الوكلاء التي تحتوي على نقطة "." مثل Mohmad.sh)
     // لأن قاعدة البيانات ترفض المفاتيح التي تحتوي على . # $ / [ ]
     // ============================================================================
+    function decodeFirebaseKey(encodedKey) {
+        let str = String(encodedKey ?? '');
+        if (str === '__EMPTY_KEY__') return '';
+        // فك أي ترميز متكرر حتى يعود الاسم الأصلي النظيف تماماً (مثلاً Mohmad%25252Esh -> Mohmad.sh)
+        for (let i = 0; i < 150; i++) {
+            const next = str
+                .replace(/%5D/gi, ']')
+                .replace(/%5B/gi, '[')
+                .replace(/%2F/gi, '/')
+                .replace(/%24/gi, '$')
+                .replace(/%23/gi, '#')
+                .replace(/%2E/gi, '.')
+                .replace(/%25/gi, '%');
+            if (next === str) break;
+            str = next;
+        }
+        return str.trim();
+    }
+
     function encodeFirebaseKey(key) {
-        const str = String(key ?? '').trim();
-        if (!str) return '__EMPTY_KEY__';
-        return str
+        // فك الترميز أولاً لضمان عدم حدوث ترميز مزدوج نهائياً (Idempotent 100%)
+        const raw = decodeFirebaseKey(key);
+        if (!raw || raw.length > 200) return '__EMPTY_KEY__';
+        return raw
             .replace(/%/g, '%25')
             .replace(/\./g, '%2E')
             .replace(/#/g, '%23')
@@ -143,25 +163,12 @@
             .replace(/\]/g, '%5D');
     }
 
-    function decodeFirebaseKey(encodedKey) {
-        const str = String(encodedKey ?? '');
-        if (str === '__EMPTY_KEY__') return '';
-        return str
-            .replace(/%5D/g, ']')
-            .replace(/%5B/g, '[')
-            .replace(/%2F/g, '/')
-            .replace(/%24/g, '$')
-            .replace(/%23/g, '#')
-            .replace(/%2E/g, '.')
-            .replace(/%25/g, '%');
-    }
-
     function encodeFirebaseMap(mapObj) {
         const out = {};
         if (!mapObj || typeof mapObj !== 'object') return out;
         for (const [k, v] of Object.entries(mapObj)) {
             const cleanKey = encodeFirebaseKey(k);
-            if (cleanKey && v !== undefined) {
+            if (cleanKey && cleanKey !== '__EMPTY_KEY__' && v !== undefined) {
                 out[cleanKey] = Boolean(v);
             }
         }
@@ -173,12 +180,15 @@
         if (!mapObj || typeof mapObj !== 'object') return out;
         for (const [k, v] of Object.entries(mapObj)) {
             const decodedKey = decodeFirebaseKey(k);
-            if (decodedKey && v !== undefined) {
+            if (decodedKey && decodedKey.length <= 200 && v !== undefined) {
                 out[decodedKey] = Boolean(v);
             }
         }
         return out;
     }
+
+    // تنظيف أي مفاتيح متضخمة سابقة في الذاكرة المحلية فور تشغيل السكربت
+    agentProfitStatus = decodeFirebaseMap(agentProfitStatus);
 
     function sanitizeForFirebase(val) {
         if (val === undefined || Number.isNaN(val)) return null;
@@ -188,8 +198,9 @@
         if (val && typeof val === 'object') {
             const cleanObj = {};
             for (const [k, v] of Object.entries(val)) {
-                if (v !== undefined) {
-                    cleanObj[encodeFirebaseKey(k)] = sanitizeForFirebase(v);
+                const safeKey = encodeFirebaseKey(k);
+                if (safeKey && safeKey !== '__EMPTY_KEY__' && v !== undefined) {
+                    cleanObj[safeKey] = sanitizeForFirebase(v);
                 }
             }
             return cleanObj;
@@ -513,6 +524,7 @@
             firebaseDbRef.on('value', (snapshot) => {
                 if (snapshot.exists()) {
                     const cloudData = snapshot.val();
+                    const wasFirstSync = !initialCloudSyncDone;
                     isApplyingCloudUpdate = true;
 
                     const cloudMemory = normalizeArray(cloudData.memory);
@@ -520,6 +532,7 @@
                     const cloudPayments = normalizeArray(cloudData.companyPayments);
                     const cloudDeleted = normalizeArray(cloudData.deletedIds).map(String);
                     const cloudStatusDecoded = decodeFirebaseMap(cloudData.agentProfitStatus);
+                    const cloudHadMultiEncodedKeys = Object.keys(cloudData.agentProfitStatus || {}).some(k => /%25/i.test(k));
                     const cloudRestoredAt = Number(cloudData.lastRestoredAt) || 0;
 
                     // إذا قام جهاز آخر باستعادة خزنة الطوارئ أو نسخة احتياطية حديثاً، نصفر قائمة المحذوفات القديمة على هذا الجهاز أيضاً!
@@ -533,9 +546,9 @@
                     const combinedDeletedSet = new Set([...deletedIds.map(String), ...cloudDeleted]);
                     deletedIds = Array.from(combinedDeletedSet);
 
-                    const prevLocalCount = memory.length + siteCharges.length + companyPayments.length;
                     const cloudCount = cloudMemory.length + cloudCharges.length + cloudPayments.length;
-                    const hasUnsyncedLocalStatus = Object.keys(agentProfitStatus).some(k => cloudStatusDecoded[k] !== agentProfitStatus[k]);
+                    const localStatusDecoded = decodeFirebaseMap(agentProfitStatus);
+                    const hasUnsyncedLocalStatus = wasFirstSync && Object.keys(localStatusDecoded).some(k => cloudStatusDecoded[k] !== localStatusDecoded[k]);
 
                     // إذا كانت السحابة قد تم تصفيرها عمداً (clearedAt أحدث)، نحترم التصفير مع حفظ نسخة طوارئ محلية أولاً
                     if (cloudData.isCleared && cloudCount === 0 && initialCloudSyncDone) {
@@ -549,7 +562,7 @@
                         memory = mergeListsById(memory, cloudMemory, combinedDeletedSet);
                         siteCharges = mergeListsById(siteCharges, cloudCharges, combinedDeletedSet);
                         companyPayments = mergeListsById(companyPayments, cloudPayments, combinedDeletedSet);
-                        agentProfitStatus = { ...cloudStatusDecoded, ... decodeFirebaseMap(agentProfitStatus) };
+                        agentProfitStatus = { ...cloudStatusDecoded, ...localStatusDecoded };
                     }
 
                     const mergedCount = memory.length + siteCharges.length + companyPayments.length;
@@ -560,8 +573,8 @@
                     initialCloudSyncDone = true;
                     updateCloudBadge('online', '🔐 التخزين المركزي: متصل ومحمي');
 
-                    // إذا كان لدى المتصفح المحلي حركات أو حالات وكلاء إضافية لم تكن في السحابة، نرفع النسخة المدمجة فوراً
-                    if (mergedCount > cloudCount || hasUnsyncedLocalStatus) {
+                    // إذا كان لدى المتصفح المحلي حركات إضافية أو تم تنظيف مفاتيح متضخمة، نرفع النسخة النظيفة مرة واحدة
+                    if (mergedCount > cloudCount || hasUnsyncedLocalStatus || cloudHadMultiEncodedKeys) {
                         syncToCloud();
                     }
                 } else {
