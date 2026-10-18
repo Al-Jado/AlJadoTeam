@@ -126,6 +126,77 @@
         }
     }
 
+    // ============================================================================
+    // 🔧 ترميز مفاتيح الكائنات (مثل أسماء الوكلاء التي تحتوي على نقطة "." مثل Mohmad.sh)
+    // لأن قاعدة البيانات ترفض المفاتيح التي تحتوي على . # $ / [ ]
+    // ============================================================================
+    function encodeFirebaseKey(key) {
+        const str = String(key ?? '').trim();
+        if (!str) return '__EMPTY_KEY__';
+        return str
+            .replace(/%/g, '%25')
+            .replace(/\./g, '%2E')
+            .replace(/#/g, '%23')
+            .replace(/\$/g, '%24')
+            .replace(/\//g, '%2F')
+            .replace(/\[/g, '%5B')
+            .replace(/\]/g, '%5D');
+    }
+
+    function decodeFirebaseKey(encodedKey) {
+        const str = String(encodedKey ?? '');
+        if (str === '__EMPTY_KEY__') return '';
+        return str
+            .replace(/%5D/g, ']')
+            .replace(/%5B/g, '[')
+            .replace(/%2F/g, '/')
+            .replace(/%24/g, '$')
+            .replace(/%23/g, '#')
+            .replace(/%2E/g, '.')
+            .replace(/%25/g, '%');
+    }
+
+    function encodeFirebaseMap(mapObj) {
+        const out = {};
+        if (!mapObj || typeof mapObj !== 'object') return out;
+        for (const [k, v] of Object.entries(mapObj)) {
+            const cleanKey = encodeFirebaseKey(k);
+            if (cleanKey && v !== undefined) {
+                out[cleanKey] = Boolean(v);
+            }
+        }
+        return out;
+    }
+
+    function decodeFirebaseMap(mapObj) {
+        const out = {};
+        if (!mapObj || typeof mapObj !== 'object') return out;
+        for (const [k, v] of Object.entries(mapObj)) {
+            const decodedKey = decodeFirebaseKey(k);
+            if (decodedKey && v !== undefined) {
+                out[decodedKey] = Boolean(v);
+            }
+        }
+        return out;
+    }
+
+    function sanitizeForFirebase(val) {
+        if (val === undefined || Number.isNaN(val)) return null;
+        if (Array.isArray(val)) {
+            return val.filter(item => item !== undefined && item !== null).map(item => sanitizeForFirebase(item));
+        }
+        if (val && typeof val === 'object') {
+            const cleanObj = {};
+            for (const [k, v] of Object.entries(val)) {
+                if (v !== undefined) {
+                    cleanObj[encodeFirebaseKey(k)] = sanitizeForFirebase(v);
+                }
+            }
+            return cleanObj;
+        }
+        return val;
+    }
+
     // حفظ تراكمي غير قابل للمسح في خزنة الطوارئ (تحتفظ بكل سجل أُنشئ حتى لو حُذف لاحقاً)
     function saveSafetyVaultSnapshot(reason = 'auto') {
         let existingVault = null;
@@ -136,28 +207,33 @@
         const prevMem = existingVault ? normalizeArray(existingVault.memory) : [];
         const prevCharges = existingVault ? normalizeArray(existingVault.siteCharges) : [];
         const prevPayments = existingVault ? normalizeArray(existingVault.companyPayments) : [];
-        const prevStatus = (existingVault && existingVault.agentProfitStatus) ? existingVault.agentProfitStatus : {};
+        const prevStatus = (existingVault && existingVault.agentProfitStatus) ? decodeFirebaseMap(existingVault.agentProfitStatus) : {};
 
         const mergedVaultMem = mergeListsById(memory, prevMem, new Set());
         const mergedVaultCharges = mergeListsById(siteCharges, prevCharges, new Set());
         const mergedVaultPayments = mergeListsById(companyPayments, prevPayments, new Set());
+        const mergedStatus = { ...prevStatus, ...agentProfitStatus };
 
         if (mergedVaultMem.length === 0 && mergedVaultCharges.length === 0 && mergedVaultPayments.length === 0) return;
 
-        const snapshot = {
+        const localSnapshot = {
             reason: reason,
             savedAt: new Date().toISOString(),
             memory: mergedVaultMem,
-            agentProfitStatus: { ...prevStatus, ...agentProfitStatus },
+            agentProfitStatus: mergedStatus,
             siteCharges: mergedVaultCharges,
             companyPayments: mergedVaultPayments
         };
         try {
-            localStorage.setItem('alJadoSafetyVault', JSON.stringify(snapshot));
+            localStorage.setItem('alJadoSafetyVault', JSON.stringify(localSnapshot));
         } catch (e) {}
 
         if (firebaseVaultRef) {
-            firebaseVaultRef.set(snapshot).catch(() => {});
+            const cloudSnapshot = sanitizeForFirebase({
+                ...localSnapshot,
+                agentProfitStatus: encodeFirebaseMap(mergedStatus)
+            });
+            firebaseVaultRef.set(cloudSnapshot).catch(() => {});
         }
     }
 
@@ -210,8 +286,8 @@
             siteCharges = mergeListsById(siteCharges, vaultCharges, new Set());
             companyPayments = mergeListsById(companyPayments, vaultPayments, new Set());
             agentProfitStatus = {
-                ...(cloudVault?.agentProfitStatus || {}),
-                ...(localVault?.agentProfitStatus || {}),
+                ...decodeFirebaseMap(cloudVault?.agentProfitStatus),
+                ...decodeFirebaseMap(localVault?.agentProfitStatus),
                 ...agentProfitStatus
             };
 
@@ -443,6 +519,7 @@
                     const cloudCharges = normalizeArray(cloudData.siteCharges);
                     const cloudPayments = normalizeArray(cloudData.companyPayments);
                     const cloudDeleted = normalizeArray(cloudData.deletedIds).map(String);
+                    const cloudStatusDecoded = decodeFirebaseMap(cloudData.agentProfitStatus);
                     const cloudRestoredAt = Number(cloudData.lastRestoredAt) || 0;
 
                     // إذا قام جهاز آخر باستعادة خزنة الطوارئ أو نسخة احتياطية حديثاً، نصفر قائمة المحذوفات القديمة على هذا الجهاز أيضاً!
@@ -458,6 +535,7 @@
 
                     const prevLocalCount = memory.length + siteCharges.length + companyPayments.length;
                     const cloudCount = cloudMemory.length + cloudCharges.length + cloudPayments.length;
+                    const hasUnsyncedLocalStatus = Object.keys(agentProfitStatus).some(k => cloudStatusDecoded[k] !== agentProfitStatus[k]);
 
                     // إذا كانت السحابة قد تم تصفيرها عمداً (clearedAt أحدث)، نحترم التصفير مع حفظ نسخة طوارئ محلية أولاً
                     if (cloudData.isCleared && cloudCount === 0 && initialCloudSyncDone) {
@@ -471,7 +549,7 @@
                         memory = mergeListsById(memory, cloudMemory, combinedDeletedSet);
                         siteCharges = mergeListsById(siteCharges, cloudCharges, combinedDeletedSet);
                         companyPayments = mergeListsById(companyPayments, cloudPayments, combinedDeletedSet);
-                        agentProfitStatus = { ...(cloudData.agentProfitStatus || {}), ...agentProfitStatus };
+                        agentProfitStatus = { ...cloudStatusDecoded, ... decodeFirebaseMap(agentProfitStatus) };
                     }
 
                     const mergedCount = memory.length + siteCharges.length + companyPayments.length;
@@ -482,13 +560,13 @@
                     initialCloudSyncDone = true;
                     updateCloudBadge('online', '🔐 التخزين المركزي: متصل ومحمي');
 
-                    // إذا كان لدى المتصفح المحلي حركات إضافية لم تكن في السحابة، نرفع النسخة المدمجة فوراً
-                    if (mergedCount > cloudCount) {
+                    // إذا كان لدى المتصفح المحلي حركات أو حالات وكلاء إضافية لم تكن في السحابة، نرفع النسخة المدمجة فوراً
+                    if (mergedCount > cloudCount || hasUnsyncedLocalStatus) {
                         syncToCloud();
                     }
                 } else {
                     initialCloudSyncDone = true;
-                    if (memory.length > 0 || siteCharges.length > 0 || companyPayments.length > 0) {
+                    if (memory.length > 0 || siteCharges.length > 0 || companyPayments.length > 0 || Object.keys(agentProfitStatus).length > 0) {
                         syncToCloud();
                     }
                     updateCloudBadge('online', '🔐 التخزين المركزي: متصل ومحمي');
@@ -553,16 +631,16 @@
                     memory = mergeListsById(memory, normalizeArray(cloudData.memory), combinedDeletedSet);
                     siteCharges = mergeListsById(siteCharges, normalizeArray(cloudData.siteCharges), combinedDeletedSet);
                     companyPayments = mergeListsById(companyPayments, normalizeArray(cloudData.companyPayments), combinedDeletedSet);
-                    agentProfitStatus = { ...(cloudData.agentProfitStatus || {}), ...agentProfitStatus };
+                    agentProfitStatus = { ...decodeFirebaseMap(cloudData.agentProfitStatus), ...decodeFirebaseMap(agentProfitStatus) };
                     saveLocalOnly();
                     refreshAllViews();
                 }
                 initialCloudSyncDone = true;
             }
 
-            await firebaseDbRef.set({
+            const payload = sanitizeForFirebase({
                 memory: memory,
-                agentProfitStatus: agentProfitStatus,
+                agentProfitStatus: encodeFirebaseMap(agentProfitStatus),
                 siteCharges: siteCharges,
                 companyPayments: companyPayments,
                 deletedIds: deletedIds.slice(-500),
@@ -570,6 +648,8 @@
                 isCleared: isClearedExplicitly === true && memory.length === 0,
                 lastUpdated: new Date().toISOString()
             });
+
+            await firebaseDbRef.set(payload);
 
             // تحديث خزنة الطوارئ السحابية تلقائياً إذا كانت هناك بيانات
             if (memory.length > 0 || siteCharges.length > 0 || companyPayments.length > 0) {
@@ -1463,7 +1543,7 @@
                     localStorage.setItem('alJadoLastRestoredAt', String(lastRestoredAt));
 
                     memory = mergeListsById(memory, Array.isArray(data.memory) ? data.memory : [], new Set());
-                    agentProfitStatus = { ...agentProfitStatus, ...(data.agentProfitStatus || {}) };
+                    agentProfitStatus = { ...decodeFirebaseMap(agentProfitStatus), ...decodeFirebaseMap(data.agentProfitStatus || {}) };
                     siteCharges = mergeListsById(siteCharges, Array.isArray(data.siteCharges) ? data.siteCharges : [], new Set());
                     companyPayments = mergeListsById(companyPayments, Array.isArray(data.companyPayments) ? data.companyPayments : [], new Set());
 
