@@ -343,12 +343,15 @@
             <button type="button" class="pin-toggle-btn" onclick="togglePinVisibility()" title="إظهار / إخفاء رمز المرور">👁️</button>
         </div>
 
+        <div id="pinModalFeedback" style="display: none; font-size: 0.8rem; font-weight: 700; margin-bottom: 12px; padding: 8px; border-radius: 8px;"></div>
+
         <div style="display: flex; flex-direction: column; gap: 8px;">
             <button class="btn btn-primary" style="width: 100%; padding: 11px;" onclick="saveCloudConfigFromModal()">🔓 تأكيد ومزامنة البيانات</button>
             <div style="display: flex; gap: 8px;">
-                <button class="btn btn-outline-green" style="flex: 1; font-size: 0.78rem;" onclick="forcePushLocalToCloud()">⬆️ تحديث التخزين المركزي</button>
-                <button class="btn btn-outline-red" style="padding: 8px 16px; font-size: 0.78rem;" onclick="closeCloudModal()">إغلاق</button>
+                <button class="btn btn-outline-green" style="flex: 1; font-size: 0.78rem;" onclick="forcePushLocalToCloud()">🔄 مزامنة ودمج فوري</button>
+                <button class="btn btn-outline-yellow" style="flex: 1; font-size: 0.78rem;" onclick="recoverFromSafetyVault()">🛟 استرجاع طوارئ</button>
             </div>
+            <button class="btn btn-outline-red" style="width: 100%; padding: 8px 16px; font-size: 0.78rem;" onclick="closeCloudModal()">إغلاق النافذة</button>
         </div>
     </div>
 </div>

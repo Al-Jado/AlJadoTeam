@@ -1,9 +1,7 @@
     // ============================================================================
-    // ☁️ إعدادات FIREBASE الثابتة (ضع رابط قاعدة البيانات هنا ليعمل على كل الأجهزة تلقائياً)
+    // ☁️ إعدادات التخزين المركزي الثابتة
     // ============================================================================
     const DEFAULT_FIREBASE_CONFIG = {
-        // بعد إنشاء قاعدة البيانات في Firebase، ضع الرابط هنا بين علامتي التنصيص:
-        // مثال: databaseURL: "https://al-jado-team-default-rtdb.firebaseio.com"
         databaseURL: "https://al-jado-default-rtdb.firebaseio.com"
     };
 
@@ -12,14 +10,26 @@
     let agentProfitStatus = JSON.parse(localStorage.getItem('agentProfitStatus')) || {};
     let siteCharges = JSON.parse(localStorage.getItem('alJadoSiteCharges')) || [];
     let companyPayments = JSON.parse(localStorage.getItem('alJadoCompanyPayments')) || [];
+    let deletedIds = JSON.parse(localStorage.getItem('alJadoDeletedIds')) || [];
     let currentDisplayedOps = [];
 
-    // متغيرات اتصال Firebase
+    // متغيرات اتصال ومزامنة التخزين المركزي
     let firebaseDbRef = null;
+    let firebaseVaultRef = null;
     let isApplyingCloudUpdate = false;
+    let initialCloudSyncDone = false;
 
-    document.addEventListener("DOMContentLoaded", () => {
-        const today = new Date().toISOString().split('T')[0];
+    // حساب التاريخ المحلي بدقة (تجنب مشكلة توقيت غرينتش بعد منتصف الليل)
+    function getLocalTodayString() {
+        const d = new Date();
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+        const today = getLocalTodayString();
         const currentMonth = today.substring(0, 7);
 
         document.getElementById('docDate').value = today;
@@ -27,20 +37,224 @@
         document.getElementById('filterFromDate').value = currentMonth + "-01";
         document.getElementById('filterToDate').value = today;
 
+        // إذا كانت الذاكرة المحلية فارغة، نحاول الاسترجاع التلقائي من IndexedDB الاحتياطي
+        if (memory.length === 0 && siteCharges.length === 0 && companyPayments.length === 0) {
+            await tryRestoreFromIndexedDB();
+        }
+
+        // استرجاع أي مسودة إدخال لم يتم حفظها بعد
+        restoreDraftInputs();
+        setupDraftAutoSaveListeners();
+
         loadArchive();
         buildDropdown();
         renderAgentsControl();
         updateTreasury();
         runRangeFilter();
 
-        // بدء الاتصال بالسحابة إن وجدت الإعدادات
+        // بدء الاتصال بالتخزين المركزي
         initFirebaseSync();
     });
 
     function formatNum(num) { return Number(num).toLocaleString('en-US'); }
 
     // ============================================================================
-    // ☁️ منظومة المزامنة السحابية المحمية بكلمة سر (Firebase Realtime Database)
+    // 🛡️ منظومة الحماية من ضياع البيانات (IndexedDB + Safety Vault + Draft Save)
+    // ============================================================================
+    function openIndexedDB() {
+        return new Promise((resolve, reject) => {
+            if (!window.indexedDB) return resolve(null);
+            const req = window.indexedDB.open('AlJadoBackupDB', 1);
+            req.onupgradeneeded = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('snapshots')) {
+                    db.createObjectStore('snapshots', { keyPath: 'id' });
+                }
+            };
+            req.onsuccess = (e) => resolve(e.target.result);
+            req.onerror = () => resolve(null);
+        });
+    }
+
+    async function saveToIndexedDB(snapshotId = 'latest') {
+        try {
+            const db = await openIndexedDB();
+            if (!db) return;
+            const tx = db.transaction('snapshots', 'readwrite');
+            const store = tx.objectStore('snapshots');
+            store.put({
+                id: snapshotId,
+                timestamp: Date.now(),
+                memory: memory,
+                agentProfitStatus: agentProfitStatus,
+                siteCharges: siteCharges,
+                companyPayments: companyPayments,
+                deletedIds: deletedIds
+            });
+        } catch (e) {}
+    }
+
+    async function tryRestoreFromIndexedDB() {
+        try {
+            const db = await openIndexedDB();
+            if (!db) return false;
+            return new Promise((resolve) => {
+                const tx = db.transaction('snapshots', 'readonly');
+                const store = tx.objectStore('snapshots');
+                const req = store.get('latest');
+                req.onsuccess = () => {
+                    const data = req.result;
+                    if (data && ((data.memory && data.memory.length > 0) || (data.siteCharges && data.siteCharges.length > 0))) {
+                        memory = data.memory || [];
+                        agentProfitStatus = data.agentProfitStatus || {};
+                        siteCharges = data.siteCharges || [];
+                        companyPayments = data.companyPayments || [];
+                        deletedIds = data.deletedIds || [];
+                        saveLocalOnly();
+                        resolve(true);
+                    } else {
+                        resolve(false);
+                    }
+                };
+                req.onerror = () => resolve(false);
+            });
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // حفظ نسخة طوارئ تلقائية قبل أي عملية حذف أو مسح
+    function saveSafetyVaultSnapshot(reason = 'auto') {
+        if (memory.length === 0 && siteCharges.length === 0 && companyPayments.length === 0) return;
+        const snapshot = {
+            reason: reason,
+            savedAt: new Date().toISOString(),
+            memory: [...memory],
+            agentProfitStatus: { ...agentProfitStatus },
+            siteCharges: [...siteCharges],
+            companyPayments: [...companyPayments]
+        };
+        try {
+            localStorage.setItem('alJadoSafetyVault', JSON.stringify(snapshot));
+        } catch (e) {}
+        saveToIndexedDB('safety_vault');
+
+        if (firebaseVaultRef) {
+            firebaseVaultRef.set(snapshot).catch(() => {});
+        }
+    }
+
+    // استرجاع البيانات بضغطة زر في حال الحذف الخاطئ
+    async function recoverFromSafetyVault() {
+        let vaultData = null;
+
+        // 1. محاولة القراءة من خزنة الطوارئ السحابية أولاً
+        if (firebaseVaultRef) {
+            try {
+                const snap = await firebaseVaultRef.once('value');
+                if (snap.exists()) {
+                    vaultData = snap.val();
+                }
+            } catch (e) {}
+        }
+
+        // 2. محاولة القراءة من خزنة الطوارئ المحلية
+        if (!vaultData) {
+            try {
+                vaultData = JSON.parse(localStorage.getItem('alJadoSafetyVault'));
+            } catch (e) {}
+        }
+
+        // 3. محاولة القراءة من IndexedDB
+        if (!vaultData) {
+            const db = await openIndexedDB();
+            if (db) {
+                vaultData = await new Promise((resolve) => {
+                    const tx = db.transaction('snapshots', 'readonly');
+                    const req = tx.objectStore('snapshots').get('safety_vault');
+                    req.onsuccess = () => resolve(req.result || null);
+                    req.onerror = () => resolve(null);
+                });
+            }
+        }
+
+        if (!vaultData || (!vaultData.memory && !vaultData.siteCharges)) {
+            alert("ℹ️ لا توجد نسخة طوارئ سابقة مسجلة لاستعادتها حالياً.");
+            return;
+        }
+
+        const vaultMem = Array.isArray(vaultData.memory) ? vaultData.memory : (vaultData.memory ? Object.values(vaultData.memory) : []);
+        const vaultCharges = Array.isArray(vaultData.siteCharges) ? vaultData.siteCharges : (vaultData.siteCharges ? Object.values(vaultData.siteCharges) : []);
+        const vaultPayments = Array.isArray(vaultData.companyPayments) ? vaultData.companyPayments : (vaultData.companyPayments ? Object.values(vaultData.companyPayments) : []);
+
+        if (confirm(`هل تريد استرجاع بيانات الطوارئ المحفوظة (${vaultMem.length} حركة وكيل و ${vaultCharges.length} شحنة)؟ سيتم دمجها مع بياناتك الحالية دون حذف أي شيء.`)) {
+            deletedIds = [];
+            localStorage.setItem('alJadoDeletedIds', JSON.stringify(deletedIds));
+
+            memory = mergeListsById(memory, vaultMem, new Set());
+            siteCharges = mergeListsById(siteCharges, vaultCharges, new Set());
+            companyPayments = mergeListsById(companyPayments, vaultPayments, new Set());
+            agentProfitStatus = { ...(vaultData.agentProfitStatus || {}), ...agentProfitStatus };
+
+            saveLocalOnly();
+            refreshAllViews();
+            await syncToCloud(true);
+            closeCloudModal();
+            alert("✅ تم استرجاع كافة البيانات من خزنة الطوارئ ومزامنتها بنجاح!");
+        }
+    }
+
+    // حفظ واسترجاع مسودة الإدخال تلقائياً لمنع ضياع الأرقام المكتوبة قبل الضغط على حفظ
+    function setupDraftAutoSaveListeners() {
+        const draftFields = ['agentName', 'inputT', 'inputW', 'inputRollover', 'inputMyPercent', 'inputAgentPercent', 'siteChargeInput', 'companyPaymentInput'];
+        draftFields.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', saveDraftInputs);
+            }
+        });
+
+        // تنبيه المستخدم إذا حاول إغلاق التبويب وهناك أرقام في الخانات لم يضغط على "حفظ العملية" لها
+        window.addEventListener('beforeunload', (e) => {
+            const tVal = Number(document.getElementById('inputT')?.value) || 0;
+            const wVal = Number(document.getElementById('inputW')?.value) || 0;
+            const rVal = Number(document.getElementById('inputRollover')?.value) || 0;
+            if (tVal !== 0 || wVal !== 0 || rVal !== 0) {
+                e.preventDefault();
+                e.returnValue = 'لديك أرقام مكتوبة في خانات الإدخال لم تضغط على حفظ العملية لها بعد!';
+            }
+        });
+    }
+
+    function saveDraftInputs() {
+        try {
+            const draft = {
+                agentName: document.getElementById('agentName')?.value || '',
+                inputT: document.getElementById('inputT')?.value || '',
+                inputW: document.getElementById('inputW')?.value || '',
+                inputRollover: document.getElementById('inputRollover')?.value || '',
+                inputMyPercent: document.getElementById('inputMyPercent')?.value || '',
+                inputAgentPercent: document.getElementById('inputAgentPercent')?.value || ''
+            };
+            localStorage.setItem('alJadoDraftInputs', JSON.stringify(draft));
+        } catch (e) {}
+    }
+
+    function restoreDraftInputs() {
+        try {
+            const draft = JSON.parse(localStorage.getItem('alJadoDraftInputs'));
+            if (!draft) return;
+            if (draft.agentName) document.getElementById('agentName').value = draft.agentName;
+            if (draft.inputT) document.getElementById('inputT').value = draft.inputT;
+            if (draft.inputW) document.getElementById('inputW').value = draft.inputW;
+            if (draft.inputRollover) document.getElementById('inputRollover').value = draft.inputRollover;
+            if (draft.inputMyPercent) document.getElementById('inputMyPercent').value = draft.inputMyPercent;
+            if (draft.inputAgentPercent) document.getElementById('inputAgentPercent').value = draft.inputAgentPercent;
+        } catch (e) {}
+    }
+
+    // ============================================================================
+    // ☁️ منظومة المزامنة المركزية والدمج الذكي غير المدمّر (Smart Merge Sync)
     // ============================================================================
     function getActiveFirebaseConfig() {
         try {
@@ -67,9 +281,84 @@
         label.innerText = text;
     }
 
-    function initFirebaseSync() {
+    function showPinModalFeedback(type, msg) {
+        const box = document.getElementById('pinModalFeedback');
+        if (!box) return;
+        if (!msg) {
+            box.style.display = 'none';
+            return;
+        }
+        box.style.display = 'block';
+        if (type === 'error') {
+            box.style.background = 'rgba(255, 56, 56, 0.15)';
+            box.style.border = '1px solid var(--cyber-red)';
+            box.style.color = '#ffaaaa';
+        } else if (type === 'success') {
+            box.style.background = 'rgba(0, 255, 136, 0.12)';
+            box.style.border = '1px solid var(--cyber-green)';
+            box.style.color = 'var(--cyber-green)';
+        } else {
+            box.style.background = 'rgba(0, 210, 255, 0.12)';
+            box.style.border = '1px solid var(--cyber-blue)';
+            box.style.color = 'var(--cyber-blue)';
+        }
+        box.innerText = msg;
+    }
+
+    // دمج قائمتين حسب المعرّف (id) بدون فقدان أي سجل من الطرفين مع احترام قائمة المحذوفات
+    function mergeListsById(localList, cloudList, deletedSet) {
+        const map = new Map();
+        (cloudList || []).forEach(item => {
+            if (item && item.id !== undefined && !deletedSet.has(String(item.id))) {
+                map.set(String(item.id), item);
+            }
+        });
+        (localList || []).forEach(item => {
+            if (item && item.id !== undefined && !deletedSet.has(String(item.id))) {
+                map.set(String(item.id), item);
+            }
+        });
+        return Array.from(map.values());
+    }
+
+    function normalizeArray(val) {
+        if (Array.isArray(val)) return val;
+        if (val && typeof val === 'object') return Object.values(val);
+        return [];
+    }
+
+    // توليد بدائل رمز المرور لمعالجة مشكلة الحرف الكبير التلقائي في لوحة مفاتيح الموبايل
+    function getPinCaseVariants(pin) {
+        const variants = [pin];
+        const upper = pin.toUpperCase();
+        const lower = pin.toLowerCase();
+        const lowerFirst = pin.charAt(0).toLowerCase() + pin.slice(1);
+        const upperFirst = pin.charAt(0).toUpperCase() + pin.slice(1);
+        [upper, lower, lowerFirst, upperFirst].forEach(v => {
+            if (v && !variants.includes(v)) variants.push(v);
+        });
+        return variants;
+    }
+
+    async function findWorkingPinVariant(db, basePin) {
+        const variants = getPinCaseVariants(basePin);
+        for (const candidate of variants) {
+            try {
+                const testRef = db.ref(`alJadoProtected/${candidate}/alJadoSystemData`);
+                await testRef.once('value');
+                return candidate;
+            } catch (err) {
+                if (!err || err.code !== 'PERMISSION_DENIED') {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    async function initFirebaseSync(fromModal = false) {
         const config = getActiveFirebaseConfig();
-        const secretPin = getSavedCloudPin();
+        let secretPin = getSavedCloudPin();
 
         if (!config || !config.databaseURL) {
             updateCloudBadge('local', '🔐 التخزين المركزي: غير متصل');
@@ -88,7 +377,9 @@
         }
 
         try {
-            updateCloudBadge('local', '⏳ جاري مزامنة البيانات...');
+            updateCloudBadge('local', '⏳ جاري التحقق والمزامنة...');
+            if (fromModal) showPinModalFeedback('info', '⏳ جاري التحقق من رمز المرور ومزامنة البيانات...');
+
             let app;
             if (!firebase.apps.length) {
                 app = firebase.initializeApp(config);
@@ -97,37 +388,79 @@
             }
 
             const db = firebase.database(app);
+
+            // فحص ذكي لرمز المرور مع تجربة حالة الأحرف تلقائياً في حال غيّرها الكيبورد في الجوال
+            const workingPin = await findWorkingPinVariant(db, secretPin);
+            if (!workingPin) {
+                updateCloudBadge('error', '🔒 رمز المرور غير صحيح (اضغط للتعديل)');
+                showPinModalFeedback('error', '❌ رمز المرور غير مطابق! تأكد من كتابة الرمز الصحيح لتفعيل الحفظ المركزي.');
+                openCloudModal();
+                return;
+            }
+
+            if (workingPin !== secretPin) {
+                secretPin = workingPin;
+                localStorage.setItem('alJadoCloudPin', workingPin);
+            }
+
             if (firebaseDbRef) {
                 firebaseDbRef.off();
             }
 
-            // المسار المحمي بكلمة السر داخل قاعدة البيانات
             firebaseDbRef = db.ref(`alJadoProtected/${secretPin}/alJadoSystemData`);
+            firebaseVaultRef = db.ref(`alJadoProtected/${secretPin}/alJadoSafetyVault`);
+
+            if (fromModal) {
+                showPinModalFeedback('success', '✅ تم الاتصال ومزامنة البيانات بنجاح!');
+                setTimeout(() => closeCloudModal(), 600);
+            }
 
             firebaseDbRef.on('value', (snapshot) => {
                 if (snapshot.exists()) {
                     const cloudData = snapshot.val();
                     isApplyingCloudUpdate = true;
 
-                    memory = Array.isArray(cloudData.memory)
-                        ? cloudData.memory
-                        : (cloudData.memory ? Object.values(cloudData.memory) : []);
+                    const cloudMemory = normalizeArray(cloudData.memory);
+                    const cloudCharges = normalizeArray(cloudData.siteCharges);
+                    const cloudPayments = normalizeArray(cloudData.companyPayments);
+                    const cloudDeleted = normalizeArray(cloudData.deletedIds).map(String);
 
-                    agentProfitStatus = cloudData.agentProfitStatus || {};
+                    // توحيد قائمة المحذوفات بين المحلي والسحابي
+                    const combinedDeletedSet = new Set([...deletedIds.map(String), ...cloudDeleted]);
+                    deletedIds = Array.from(combinedDeletedSet);
 
-                    siteCharges = Array.isArray(cloudData.siteCharges)
-                        ? cloudData.siteCharges
-                        : (cloudData.siteCharges ? Object.values(cloudData.siteCharges) : []);
+                    const prevLocalCount = memory.length + siteCharges.length + companyPayments.length;
+                    const cloudCount = cloudMemory.length + cloudCharges.length + cloudPayments.length;
 
-                    companyPayments = Array.isArray(cloudData.companyPayments)
-                        ? cloudData.companyPayments
-                        : (cloudData.companyPayments ? Object.values(cloudData.companyPayments) : []);
+                    // إذا كانت السحابة قد تم تصفيرها عمداً (clearedAt أحدث)، نحترم التصفير مع حفظ نسخة طوارئ محلية أولاً
+                    if (cloudData.isCleared && cloudCount === 0 && initialCloudSyncDone) {
+                        saveSafetyVaultSnapshot('before_remote_clear');
+                        memory = [];
+                        siteCharges = [];
+                        companyPayments = [];
+                        agentProfitStatus = {};
+                    } else {
+                        // دمج ذكي يحافظ على كافة حركات السحابة + أي حركات سُجلت محلياً قبل الاتصال!
+                        memory = mergeListsById(memory, cloudMemory, combinedDeletedSet);
+                        siteCharges = mergeListsById(siteCharges, cloudCharges, combinedDeletedSet);
+                        companyPayments = mergeListsById(companyPayments, cloudPayments, combinedDeletedSet);
+                        agentProfitStatus = { ...(cloudData.agentProfitStatus || {}), ...agentProfitStatus };
+                    }
+
+                    const mergedCount = memory.length + siteCharges.length + companyPayments.length;
 
                     saveLocalOnly();
                     refreshAllViews();
                     isApplyingCloudUpdate = false;
+                    initialCloudSyncDone = true;
                     updateCloudBadge('online', '🔐 التخزين المركزي: متصل ومحمي');
+
+                    // إذا كان لدى المتصفح المحلي حركات إضافية لم تكن في السحابة، نرفع النسخة المدمجة فوراً
+                    if (mergedCount > cloudCount) {
+                        syncToCloud();
+                    }
                 } else {
+                    initialCloudSyncDone = true;
                     if (memory.length > 0 || siteCharges.length > 0 || companyPayments.length > 0) {
                         syncToCloud();
                     }
@@ -137,6 +470,8 @@
                 console.error("Sync Error:", error);
                 if (error && error.code === 'PERMISSION_DENIED') {
                     updateCloudBadge('error', '🔒 رمز المرور غير صحيح (اضغط للتعديل)');
+                    showPinModalFeedback('error', '❌ رمز المرور غير صحيح! يرجى إدخال الرمز الصحيح.');
+                    openCloudModal();
                 } else {
                     updateCloudBadge('error', '⚠️ خطأ اتصال بالتخزين المركزي');
                 }
@@ -148,32 +483,76 @@
     }
 
     function saveLocalOnly() {
-        localStorage.setItem('alJadoDatabase', JSON.stringify(memory));
-        localStorage.setItem('agentProfitStatus', JSON.stringify(agentProfitStatus));
-        localStorage.setItem('alJadoSiteCharges', JSON.stringify(siteCharges));
-        localStorage.setItem('alJadoCompanyPayments', JSON.stringify(companyPayments));
+        try {
+            localStorage.setItem('alJadoDatabase', JSON.stringify(memory));
+            localStorage.setItem('agentProfitStatus', JSON.stringify(agentProfitStatus));
+            localStorage.setItem('alJadoSiteCharges', JSON.stringify(siteCharges));
+            localStorage.setItem('alJadoCompanyPayments', JSON.stringify(companyPayments));
+            localStorage.setItem('alJadoDeletedIds', JSON.stringify(deletedIds));
+        } catch (e) {}
+        saveToIndexedDB('latest');
     }
 
-    function syncToCloud() {
+    async function syncToCloud(isClearedExplicitly = false) {
         saveLocalOnly();
-        if (!firebaseDbRef || isApplyingCloudUpdate) return;
 
-        firebaseDbRef.set({
-            memory: memory,
-            agentProfitStatus: agentProfitStatus,
-            siteCharges: siteCharges,
-            companyPayments: companyPayments,
-            lastUpdated: new Date().toISOString()
-        }).then(() => {
+        if (!firebaseDbRef) {
+            // إذا حاول المستخدم الحفظ وهو لم يدخل رمز المرور بعد، نفتح له نافذة رمز المرور فوراً حتى لا تبقى بياناته محلية فقط وتضيع!
+            if (!getSavedCloudPin()) {
+                openCloudModal();
+                showPinModalFeedback('error', '⚠️ تم حفظ العملية على جهازك، يرجى إدخال رمز المرور الآن لحفظها في التخزين المركزي!');
+            }
+            return;
+        }
+
+        if (isApplyingCloudUpdate) return;
+
+        try {
+            // حماية حاسمة: إذا لم تكتمل القراءة الأولى من السحابة بعد، نقرأ أولاً وندمج قبل الكتابة لمنع مسح السحابة بالخطأ!
+            if (!initialCloudSyncDone && !isClearedExplicitly) {
+                const snap = await firebaseDbRef.once('value');
+                if (snap.exists()) {
+                    const cloudData = snap.val();
+                    const cloudDeleted = normalizeArray(cloudData.deletedIds).map(String);
+                    const combinedDeletedSet = new Set([...deletedIds.map(String), ...cloudDeleted]);
+                    deletedIds = Array.from(combinedDeletedSet);
+
+                    memory = mergeListsById(memory, normalizeArray(cloudData.memory), combinedDeletedSet);
+                    siteCharges = mergeListsById(siteCharges, normalizeArray(cloudData.siteCharges), combinedDeletedSet);
+                    companyPayments = mergeListsById(companyPayments, normalizeArray(cloudData.companyPayments), combinedDeletedSet);
+                    agentProfitStatus = { ...(cloudData.agentProfitStatus || {}), ...agentProfitStatus };
+                    saveLocalOnly();
+                    refreshAllViews();
+                }
+                initialCloudSyncDone = true;
+            }
+
+            await firebaseDbRef.set({
+                memory: memory,
+                agentProfitStatus: agentProfitStatus,
+                siteCharges: siteCharges,
+                companyPayments: companyPayments,
+                deletedIds: deletedIds.slice(-500),
+                isCleared: isClearedExplicitly === true && memory.length === 0,
+                lastUpdated: new Date().toISOString()
+            });
+
+            // تحديث خزنة الطوارئ السحابية تلقائياً إذا كانت هناك بيانات
+            if (memory.length > 0 || siteCharges.length > 0 || companyPayments.length > 0) {
+                saveSafetyVaultSnapshot('auto_sync');
+            }
+
             updateCloudBadge('online', '🔐 التخزين المركزي: متزامن');
-        }).catch((err) => {
+        } catch (err) {
             console.error("Write Error:", err);
             if (err && err.code === 'PERMISSION_DENIED') {
                 updateCloudBadge('error', '🔒 رُفض الحفظ: تأكد من رمز المرور');
+                showPinModalFeedback('error', '❌ تعذر الحفظ في التخزين المركزي لأن رمز المرور غير مطابق!');
+                openCloudModal();
             } else {
                 updateCloudBadge('error', '⚠️ تعذر الحفظ في التخزين المركزي');
             }
-        });
+        }
     }
 
     function refreshAllViews() {
@@ -197,6 +576,7 @@
 
     function closeCloudModal() {
         document.getElementById('cloudModal').style.display = 'none';
+        showPinModalFeedback('', '');
     }
 
     function togglePinVisibility() {
@@ -210,27 +590,27 @@
         const pin = (pinInput ? pinInput.value : '').trim();
 
         if (!pin) {
-            alert("يرجى إدخال رمز المرور أولاً!");
+            showPinModalFeedback('error', '⚠️ يرجى إدخال رمز المرور أولاً!');
             if (pinInput) pinInput.focus();
             return;
         }
         if (/[.#$\[\]\/]/.test(pin)) {
-            alert("يرجى عدم استخدام الرموز (. # $ [ ] /) داخل رمز المرور.");
+            showPinModalFeedback('error', '⚠️ يرجى عدم استخدام الرموز (. # $ [ ] /) داخل رمز المرور.');
             return;
         }
 
         localStorage.setItem('alJadoCloudPin', pin);
-        closeCloudModal();
-        initFirebaseSync();
+        initFirebaseSync(true);
     }
 
-    function forcePushLocalToCloud() {
+    async function forcePushLocalToCloud() {
         if (!firebaseDbRef) {
-            alert("يرجى إدخال رمز المرور وتأكيد الاتصال أولاً!");
+            showPinModalFeedback('error', '⚠️ يرجى إدخال رمز المرور وتأكيد الاتصال أولاً!');
             return;
         }
-        syncToCloud();
-        alert("✅ تم تحديث البيانات في التخزين المركزي بنجاح!");
+        initialCloudSyncDone = false; // إجبار الدمج الآمن مع السحابة قبل الرفع
+        await syncToCloud(false);
+        showPinModalFeedback('success', '✅ تم دمج وتحديث البيانات في التخزين المركزي بنجاح!');
     }
 
     // ============================================================================
@@ -386,6 +766,8 @@
         document.getElementById('inputT').value = '';
         document.getElementById('inputW').value = '';
         document.getElementById('inputRollover').value = '';
+        saveDraftInputs();
+
         loadArchive();
         buildDropdown();
         renderAgentsControl();
@@ -481,7 +863,7 @@
         const fullDate = document.getElementById('docDate').value;
         
         if (val !== 0 && !isNaN(val)) {
-            siteCharges.push({ id: Date.now(), amount: val, date: fullDate, month: selectedMonth });
+            siteCharges.push({ id: Date.now() + Math.random().toString(36).substr(2, 4), amount: val, date: fullDate, month: selectedMonth });
             localStorage.setItem('alJadoSiteCharges', JSON.stringify(siteCharges));
             document.getElementById('siteChargeInput').value = '';
             updateTreasury();
@@ -491,7 +873,9 @@
 
     function deleteSiteCharge(id) {
         if (confirm("حذف هذه الشحنة؟")) {
-            siteCharges = siteCharges.filter(x => x.id !== id);
+            saveSafetyVaultSnapshot('before_delete_charge');
+            deletedIds.push(String(id));
+            siteCharges = siteCharges.filter(x => String(x.id) !== String(id));
             localStorage.setItem('alJadoSiteCharges', JSON.stringify(siteCharges));
             updateTreasury();
             syncToCloud();
@@ -504,7 +888,7 @@
         const fullDate = document.getElementById('docDate').value;
 
         if (val !== 0 && !isNaN(val)) {
-            companyPayments.push({ id: Date.now(), amount: val, date: fullDate, month: selectedMonth });
+            companyPayments.push({ id: Date.now() + Math.random().toString(36).substr(2, 4), amount: val, date: fullDate, month: selectedMonth });
             localStorage.setItem('alJadoCompanyPayments', JSON.stringify(companyPayments));
             document.getElementById('companyPaymentInput').value = '';
             updateTreasury();
@@ -514,7 +898,9 @@
 
     function deleteCompanyPayment(id) {
         if (confirm("حذف هذا التسديد؟")) {
-            companyPayments = companyPayments.filter(x => x.id !== id);
+            saveSafetyVaultSnapshot('before_delete_payment');
+            deletedIds.push(String(id));
+            companyPayments = companyPayments.filter(x => String(x.id) !== String(id));
             localStorage.setItem('alJadoCompanyPayments', JSON.stringify(companyPayments));
             updateTreasury();
             syncToCloud();
@@ -553,7 +939,7 @@
                 <span>${x.amount < 0 ? 'سحب' : 'شحنة'}: ${formatNum(x.amount)}</span>
                 <div>
                     <span style="margin-left: 6px;">${x.date}</span>
-                    <button class="btn-del-small" onclick="deleteSiteCharge(${x.id})">✖</button>
+                    <button class="btn-del-small" onclick="deleteSiteCharge('${x.id}')">✖</button>
                 </div>
             </div>
         `).join('');
@@ -563,7 +949,7 @@
                 <span>${x.amount < 0 ? 'استلام' : 'تسديد'}: ${formatNum(x.amount)}</span>
                 <div>
                     <span style="margin-left: 6px;">${x.date}</span>
-                    <button class="btn-del-small" onclick="deleteCompanyPayment(${x.id})">✖</button>
+                    <button class="btn-del-small" onclick="deleteCompanyPayment('${x.id}')">✖</button>
                 </div>
             </div>
         `).join('');
@@ -571,7 +957,9 @@
 
     function deleteTransaction(id) {
         if (confirm("حذف هذه العملية؟")) {
-            memory = memory.filter(op => op.id !== id);
+            saveSafetyVaultSnapshot('before_delete_transaction');
+            deletedIds.push(String(id));
+            memory = memory.filter(op => String(op.id) !== String(id));
             localStorage.setItem('alJadoDatabase', JSON.stringify(memory));
             loadArchive();
             updateCumulativeCalculations();
@@ -584,6 +972,10 @@
     function deleteCurrentDayOps() {
         const filterDate = document.getElementById('docDate').value;
         if (confirm(`حذف جميع سجلات يوم (${filterDate})؟`)) {
+            saveSafetyVaultSnapshot('before_delete_day');
+            memory.forEach(op => {
+                if (op.date === filterDate) deletedIds.push(String(op.id));
+            });
             memory = memory.filter(op => op.date !== filterDate);
             localStorage.setItem('alJadoDatabase', JSON.stringify(memory));
             loadArchive();
@@ -594,15 +986,27 @@
     }
 
     function clearAllDatabase() {
-        if (confirm("تنويه: مسح كافة السجلات والخزينة بالكامل؟")) {
+        const userConfirm = prompt("⚠️ تحذير هام: أنت على وشك تصفير كافة السجلات والخزينة بالكامل!\n\nلتأكيد التصفير اكتب كلمة (تصفير) في الخانة أدناه:");
+        if (userConfirm && userConfirm.trim() === "تصفير") {
+            // حفظ نسخة طوارئ كاملة قبل التصفير حتى يمكن استعادتها لو تم التصفير بالخطأ
+            saveSafetyVaultSnapshot('before_full_clear');
+
             const savedCloudCfg = localStorage.getItem('alJadoFirebaseConfig');
             const savedCloudPin = localStorage.getItem('alJadoCloudPin');
+            const savedVault = localStorage.getItem('alJadoSafetyVault');
+
+            memory.forEach(op => deletedIds.push(String(op.id)));
+            siteCharges.forEach(c => deletedIds.push(String(c.id)));
+            companyPayments.forEach(p => deletedIds.push(String(p.id)));
+
             memory = []; siteCharges = []; companyPayments = []; agentProfitStatus = {};
             localStorage.clear();
             if (savedCloudCfg) localStorage.setItem('alJadoFirebaseConfig', savedCloudCfg);
             if (savedCloudPin) localStorage.setItem('alJadoCloudPin', savedCloudPin);
+            if (savedVault) localStorage.setItem('alJadoSafetyVault', savedVault);
+
             loadArchive(); buildDropdown(); renderAgentsControl(); updateTreasury(); runRangeFilter();
-            syncToCloud();
+            syncToCloud(true);
         }
     }
 
@@ -784,7 +1188,7 @@
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
-        const dateStamp = document.getElementById('docDate').value || new Date().toISOString().split('T')[0];
+        const dateStamp = document.getElementById('docDate').value || getLocalTodayString();
         link.href = url;
         link.download = `AL-JADO-Report-${dateStamp}.csv`;
         document.body.appendChild(link);
@@ -795,7 +1199,7 @@
 
     function exportFormattedReport(mode) {
         const { ops, scopeTitle, selectedMonth } = getExportTargetData();
-        const dateStamp = document.getElementById('docDate').value || new Date().toISOString().split('T')[0];
+        const dateStamp = document.getElementById('docDate').value || getLocalTodayString();
 
         let sumT = 0, sumWCash = 0, sumRollover = 0, sumWCombined = 0, sumProfit = 0;
 
@@ -996,7 +1400,7 @@
         const blob = new Blob([JSON.stringify(backupObj, null, 2)], { type: 'application/json;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
-        const dateStamp = document.getElementById('docDate').value || new Date().toISOString().split('T')[0];
+        const dateStamp = document.getElementById('docDate').value || getLocalTodayString();
         link.href = url;
         link.download = `AL-JADO-Backup-${dateStamp}.json`;
         document.body.appendChild(link);
@@ -1017,14 +1421,19 @@
                     alert("⚠️ ملف النسخة الاحتياطية غير صالح!");
                     return;
                 }
-                if (confirm("هل أنت متأكد من استعادة هذه النسخة الاحتياطية؟ سيتم استبدال البيانات الحالية وتحديث التخزين المركزي.")) {
-                    memory = Array.isArray(data.memory) ? data.memory : [];
-                    agentProfitStatus = data.agentProfitStatus || {};
-                    siteCharges = Array.isArray(data.siteCharges) ? data.siteCharges : [];
-                    companyPayments = Array.isArray(data.companyPayments) ? data.companyPayments : [];
+                if (confirm("هل أنت متأكد من استعادة هذه النسخة الاحتياطية؟ سيتم دمجها وتحديث التخزين المركزي.")) {
+                    saveSafetyVaultSnapshot('before_json_restore');
+                    deletedIds = [];
+                    localStorage.setItem('alJadoDeletedIds', JSON.stringify(deletedIds));
+
+                    memory = mergeListsById(memory, Array.isArray(data.memory) ? data.memory : [], new Set());
+                    agentProfitStatus = { ...agentProfitStatus, ...(data.agentProfitStatus || {}) };
+                    siteCharges = mergeListsById(siteCharges, Array.isArray(data.siteCharges) ? data.siteCharges : [], new Set());
+                    companyPayments = mergeListsById(companyPayments, Array.isArray(data.companyPayments) ? data.companyPayments : [], new Set());
+
                     refreshAllViews();
                     syncToCloud();
-                    alert("✅ تم استعادة النسخة الاحتياطية بنجاح!");
+                    alert("✅ تم استعادة ودمج النسخة الاحتياطية بنجاح!");
                 }
             } catch (err) {
                 alert("⚠️ حدث خطأ أثناء قراءة ملف النسخة الاحتياطية!");
